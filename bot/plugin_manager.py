@@ -66,6 +66,13 @@ class PluginManager:
             logging.exception(f'Plugin function {function_name} failed')
             return json.dumps({'error': f'Function {function_name} failed: {e}'})
 
+    def get_progress_message_key(self, function_name):
+        """
+        Return the translation key of the message shown while the function runs, or None
+        """
+        plugin = self.__get_plugin_by_function_name(function_name)
+        return plugin.get_progress_message_key(function_name) if plugin else None
+
     def get_plugin_source_name(self, function_name) -> str:
         """
         Return the source name of the plugin

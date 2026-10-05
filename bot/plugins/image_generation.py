@@ -32,6 +32,9 @@ class ImageGenerationPlugin(Plugin):
             },
         }]
 
+    def get_progress_message_key(self, function_name) -> str:
+        return 'image_generation_progress'
+
     async def execute(self, function_name, helper, **kwargs) -> Dict:
         image, _ = await helper.generate_image(kwargs['prompt'])
         if isinstance(image, str):
