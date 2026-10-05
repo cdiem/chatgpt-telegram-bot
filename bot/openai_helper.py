@@ -132,17 +132,19 @@ class OpenAIHelper:
             self.reset_chat_history(chat_id)
         return len(self.conversations[chat_id]), self.__count_tokens(self.conversations[chat_id])
 
-    async def get_chat_response(self, chat_id: int, query: str) -> tuple[str, str]:
+    async def get_chat_response(self, chat_id: int, query: str, on_function_call=None) -> tuple[str, str]:
         """
         Gets a full response from the GPT model.
         :param chat_id: The chat ID
         :param query: The query to send to the model
+        :param on_function_call: Optional async callback, awaited with the function name before a plugin runs
         :return: The answer from the model and the number of tokens used
         """
         plugins_used = ()
         response = await self.__common_get_chat_response(chat_id, query)
         if self.config['enable_functions'] and not self.conversations_vision[chat_id]:
-            response, plugins_used = await self.__handle_function_call(chat_id, response)
+            response, plugins_used = await self.__handle_function_call(chat_id, response,
+                                                                       on_function_call=on_function_call)
             if is_direct_result(response):
                 return response, '0'
 
@@ -175,17 +177,19 @@ class OpenAIHelper:
 
         return answer, response.usage.total_tokens
 
-    async def get_chat_response_stream(self, chat_id: int, query: str):
+    async def get_chat_response_stream(self, chat_id: int, query: str, on_function_call=None):
         """
         Stream response from the GPT model.
         :param chat_id: The chat ID
         :param query: The query to send to the model
+        :param on_function_call: Optional async callback, awaited with the function name before a plugin runs
         :return: The answer from the model and the number of tokens used, or 'not_finished'
         """
         plugins_used = ()
         response = await self.__common_get_chat_response(chat_id, query, stream=True)
         if self.config['enable_functions'] and not self.conversations_vision[chat_id]:
-            response, plugins_used = await self.__handle_function_call(chat_id, response, stream=True)
+            response, plugins_used = await self.__handle_function_call(chat_id, response, stream=True,
+                                                                       on_function_call=on_function_call)
             if is_direct_result(response):
                 yield response, '0'
                 return
@@ -274,7 +278,8 @@ class OpenAIHelper:
         except Exception as e:
             raise Exception(f"⚠️ _{localized_text('error', bot_language)}._ ⚠️\n{str(e)}") from e
 
-    async def __handle_function_call(self, chat_id, response, stream=False, times=0, plugins_used=()):
+    async def __handle_function_call(self, chat_id, response, stream=False, times=0, plugins_used=(),
+                                     on_function_call=None):
         tool_call_id = ''
         function_name = ''
         arguments = ''
@@ -307,6 +312,8 @@ class OpenAIHelper:
             arguments = tool_call.function.arguments
 
         logging.info(f'Calling function {function_name} with arguments {arguments}')
+        if on_function_call:
+            await on_function_call(function_name)
         function_response = await self.plugin_manager.call_function(function_name, self, arguments)
 
         if function_name not in plugins_used:
@@ -326,7 +333,7 @@ class OpenAIHelper:
             **self.__tools_args(allow_calls=times < self.config['functions_max_consecutive_calls']),
             **self.__model_args(self.config['model'], self.config['max_tokens'])
         )
-        return await self.__handle_function_call(chat_id, response, stream, times + 1, plugins_used)
+        return await self.__handle_function_call(chat_id, response, stream, times + 1, plugins_used, on_function_call)
 
     @staticmethod
     async def __prepend_chunk(chunk, response):

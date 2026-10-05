@@ -44,7 +44,7 @@ def main():
         'reasoning_effort': os.environ.get('REASONING_EFFORT', ''),
         'image_model': os.environ.get('IMAGE_MODEL', 'gpt-image-2'),
         'image_quality': os.environ.get('IMAGE_QUALITY', 'auto'),
-        'image_size': os.environ.get('IMAGE_SIZE', '1024x1024'),
+        'image_size': os.environ.get('IMAGE_SIZE', 'auto'),
         'model': model,
         'enable_functions': os.environ.get('ENABLE_FUNCTIONS', str(functions_available)).lower() == 'true',
         'functions_max_consecutive_calls': int(os.environ.get('FUNCTIONS_MAX_CONSECUTIVE_CALLS', 10)),

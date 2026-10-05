@@ -15,6 +15,7 @@ from plugins.deepl import DeeplTranslatePlugin
 from plugins.worldtimeapi import WorldTimeApiPlugin
 from plugins.whois_ import WhoisPlugin
 from plugins.webshot import WebshotPlugin
+from plugins.image_generation import ImageGenerationPlugin
 from plugins.iplocation import IpLocationPlugin
 
 
@@ -40,6 +41,7 @@ class PluginManager:
             'auto_tts': AutoTextToSpeech,
             'whois': WhoisPlugin,
             'webshot': WebshotPlugin,
+            'image_generation': ImageGenerationPlugin,
             'iplocation': IpLocationPlugin,
         }
         self.plugins = [plugin_mapping[plugin]() for plugin in enabled_plugins if plugin in plugin_mapping]
@@ -63,6 +65,13 @@ class PluginManager:
             # let the model answer without the plugin instead of failing the whole reply
             logging.exception(f'Plugin function {function_name} failed')
             return json.dumps({'error': f'Function {function_name} failed: {e}'})
+
+    def get_progress_message_key(self, function_name):
+        """
+        Return the translation key of the message shown while the function runs, or None
+        """
+        plugin = self.__get_plugin_by_function_name(function_name)
+        return plugin.get_progress_message_key(function_name) if plugin else None
 
     def get_plugin_source_name(self, function_name) -> str:
         """
