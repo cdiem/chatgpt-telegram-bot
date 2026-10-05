@@ -16,6 +16,7 @@ from plugins.worldtimeapi import WorldTimeApiPlugin
 from plugins.whois_ import WhoisPlugin
 from plugins.webshot import WebshotPlugin
 from plugins.image_generation import ImageGenerationPlugin
+from plugins.openai_web_search import OpenAIWebSearchPlugin
 from plugins.iplocation import IpLocationPlugin
 
 
@@ -42,6 +43,7 @@ class PluginManager:
             'whois': WhoisPlugin,
             'webshot': WebshotPlugin,
             'image_generation': ImageGenerationPlugin,
+            'openai_web_search': OpenAIWebSearchPlugin,
             'iplocation': IpLocationPlugin,
         }
         self.plugins = [plugin_mapping[plugin]() for plugin in enabled_plugins if plugin in plugin_mapping]

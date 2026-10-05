@@ -153,6 +153,7 @@ Check out the [official API reference](https://platform.openai.com/docs/api-refe
 | `whois`                   | Query the whois domain database - by [@jnaskali](https://github.com/jnaskali)                                                                       | -                                                                    | `whois`             |
 | `webshot`                 | Screenshot a website from a given url or domain name - by [@noriellecruz](https://github.com/noriellecruz)                                          | -                                                                    |                     |
 | `image_generation`        | Draw images when asked in a regular chat message, using `IMAGE_MODEL`, `IMAGE_QUALITY` and `IMAGE_SIZE` | - | |
+| `openai_web_search`       | Web search with sources via OpenAI's built-in `web_search` tool (Responses API), using `OPENAI_MODEL` | - | |
 | `auto_tts`                | Text to speech using OpenAI APIs - by [@Jipok](https://github.com/Jipok)                                                                            | -                                                                    |                     |
 
 #### Environment variables
