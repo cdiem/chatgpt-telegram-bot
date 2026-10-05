@@ -8,6 +8,7 @@ import tiktoken
 import openai
 
 import json
+import base64
 import httpx
 import io
 from PIL import Image
@@ -54,6 +55,16 @@ def default_max_tokens(model: str) -> int:
         return 4096
     elif model in O_MODELS:
         return 4096
+    # Newer models (gpt-5, gpt-6, ...) count reasoning tokens towards max_completion_tokens
+    return 16000
+
+
+def uses_legacy_params(model: str) -> bool:
+    """
+    Whether the model accepts max_tokens, temperature and penalties.
+    Reasoning models (o-series, gpt-5 and newer) reject them.
+    """
+    return model in GPT_ALL_MODELS and model not in O_MODELS
 
 
 def are_functions_available(model: str) -> bool:
@@ -241,23 +252,17 @@ class OpenAIHelper:
                     logging.warning(f'Error while summarising chat history: {str(e)}. Popping elements instead...')
                     self.conversations[chat_id] = self.conversations[chat_id][-self.config['max_history_size']:]
 
-            max_tokens_str = 'max_completion_tokens' if self.config['model'] in O_MODELS else 'max_tokens'
+            model = self.config['model'] if not self.conversations_vision[chat_id] else self.config['vision_model']
             common_args = {
-                'model': self.config['model'] if not self.conversations_vision[chat_id] else self.config['vision_model'],
+                'model': model,
                 'messages': self.conversations[chat_id],
-                'temperature': self.config['temperature'],
                 'n': self.config['n_choices'],
-                max_tokens_str: self.config['max_tokens'],
-                'presence_penalty': self.config['presence_penalty'],
-                'frequency_penalty': self.config['frequency_penalty'],
-                'stream': stream
+                'stream': stream,
+                **self.__model_args(model, self.config['max_tokens'])
             }
 
             if self.config['enable_functions'] and not self.conversations_vision[chat_id]:
-                functions = self.plugin_manager.get_functions_specs()
-                if len(functions) > 0:
-                    common_args['functions'] = self.plugin_manager.get_functions_specs()
-                    common_args['function_call'] = 'auto'
+                common_args.update(self.__tools_args())
             return await self.client.chat.completions.create(**common_args)
 
         except openai.RateLimitError as e:
@@ -270,35 +275,36 @@ class OpenAIHelper:
             raise Exception(f"⚠️ _{localized_text('error', bot_language)}._ ⚠️\n{str(e)}") from e
 
     async def __handle_function_call(self, chat_id, response, stream=False, times=0, plugins_used=()):
+        tool_call_id = ''
         function_name = ''
         arguments = ''
         if stream:
             async for item in response:
-                if len(item.choices) > 0:
-                    first_choice = item.choices[0]
-                    if first_choice.delta and first_choice.delta.function_call:
-                        if first_choice.delta.function_call.name:
-                            function_name += first_choice.delta.function_call.name
-                        if first_choice.delta.function_call.arguments:
-                            arguments += first_choice.delta.function_call.arguments
-                    elif first_choice.finish_reason and first_choice.finish_reason == 'function_call':
-                        break
-                    else:
-                        return response, plugins_used
-                else:
-                    return response, plugins_used
-        else:
-            if len(response.choices) > 0:
-                first_choice = response.choices[0]
-                if first_choice.message.function_call:
-                    if first_choice.message.function_call.name:
-                        function_name += first_choice.message.function_call.name
-                    if first_choice.message.function_call.arguments:
-                        arguments += first_choice.message.function_call.arguments
-                else:
-                    return response, plugins_used
-            else:
+                if len(item.choices) == 0:
+                    continue
+                first_choice = item.choices[0]
+                if first_choice.delta and first_choice.delta.tool_calls:
+                    tool_call = first_choice.delta.tool_calls[0]
+                    if tool_call.id:
+                        tool_call_id = tool_call.id
+                    if tool_call.function.name:
+                        function_name += tool_call.function.name
+                    if tool_call.function.arguments:
+                        arguments += tool_call.function.arguments
+                elif first_choice.finish_reason == 'tool_calls':
+                    break
+                elif (first_choice.delta and first_choice.delta.content) or first_choice.finish_reason:
+                    # a plain text answer: hand it back without losing the chunk we already read
+                    return self.__prepend_chunk(item, response), plugins_used
+            if not function_name:
                 return response, plugins_used
+        else:
+            if len(response.choices) == 0 or not response.choices[0].message.tool_calls:
+                return response, plugins_used
+            tool_call = response.choices[0].message.tool_calls[0]
+            tool_call_id = tool_call.id
+            function_name = tool_call.function.name
+            arguments = tool_call.function.arguments
 
         logging.info(f'Calling function {function_name} with arguments {arguments}')
         function_response = await self.plugin_manager.call_function(function_name, self, arguments)
@@ -307,26 +313,42 @@ class OpenAIHelper:
             plugins_used += (function_name,)
 
         if is_direct_result(function_response):
-            self.__add_function_call_to_history(chat_id=chat_id, function_name=function_name,
+            self.__add_function_call_to_history(chat_id, tool_call_id, function_name, arguments,
                                                 content=json.dumps({'result': 'Done, the content has been sent'
                                                                               'to the user.'}))
             return function_response, plugins_used
 
-        self.__add_function_call_to_history(chat_id=chat_id, function_name=function_name, content=function_response)
+        self.__add_function_call_to_history(chat_id, tool_call_id, function_name, arguments, content=function_response)
         response = await self.client.chat.completions.create(
             model=self.config['model'],
             messages=self.conversations[chat_id],
-            functions=self.plugin_manager.get_functions_specs(),
-            function_call='auto' if times < self.config['functions_max_consecutive_calls'] else 'none',
-            stream=stream
+            stream=stream,
+            **self.__tools_args(allow_calls=times < self.config['functions_max_consecutive_calls']),
+            **self.__model_args(self.config['model'], self.config['max_tokens'])
         )
         return await self.__handle_function_call(chat_id, response, stream, times + 1, plugins_used)
 
+    @staticmethod
+    async def __prepend_chunk(chunk, response):
+        yield chunk
+        async for item in response:
+            yield item
+
+    def __tools_args(self, allow_calls=True) -> dict:
+        """
+        Request arguments that expose the enabled plugins to the model as tools.
+        """
+        tools = [{'type': 'function', 'function': spec} for spec in self.plugin_manager.get_functions_specs()]
+        if not tools:
+            return {}
+        # one call at a time: the loop above handles a single tool call per response
+        return {'tools': tools, 'tool_choice': 'auto' if allow_calls else 'none', 'parallel_tool_calls': False}
+
     async def generate_image(self, prompt: str) -> tuple[str, str]:
         """
-        Generates an image from the given prompt using DALL·E model.
+        Generates an image from the given prompt using the image model.
         :param prompt: The prompt to send to the model
-        :return: The image URL and the image size
+        :return: The image (URL or bytes) and the image size
         """
         bot_language = self.config['bot_language']
         try:
@@ -335,7 +357,6 @@ class OpenAIHelper:
                 n=1,
                 model=self.config['image_model'],
                 quality=self.config['image_quality'],
-                style=self.config['image_style'],
                 size=self.config['image_size']
             )
 
@@ -346,7 +367,9 @@ class OpenAIHelper:
                     f"⚠️\n{localized_text('try_again', bot_language)}."
                 )
 
-            return response.data[0].url, self.config['image_size']
+            # gpt-image models return base64 data instead of a URL
+            image = response.data[0].url or base64.b64decode(response.data[0].b64_json)
+            return image, self.config['image_size']
         except Exception as e:
             raise Exception(f"⚠️ _{localized_text('error', bot_language)}._ ⚠️\n{str(e)}") from e
 
@@ -439,12 +462,9 @@ class OpenAIHelper:
             common_args = {
                 'model': self.config['vision_model'],
                 'messages': self.conversations[chat_id][:-1] + [message],
-                'temperature': self.config['temperature'],
                 'n': 1, # several choices is not implemented yet
-                'max_tokens': self.config['vision_max_tokens'],
-                'presence_penalty': self.config['presence_penalty'],
-                'frequency_penalty': self.config['frequency_penalty'],
-                'stream': stream
+                'stream': stream,
+                **self.__model_args(self.config['vision_model'], self.config['vision_max_tokens'])
             }
 
 
@@ -584,11 +604,14 @@ class OpenAIHelper:
         max_age_minutes = self.config['max_conversation_age_minutes']
         return last_updated < now - datetime.timedelta(minutes=max_age_minutes)
 
-    def __add_function_call_to_history(self, chat_id, function_name, content):
+    def __add_function_call_to_history(self, chat_id, tool_call_id, function_name, arguments, content):
         """
-        Adds a function call to the conversation history
+        Adds a tool call and its result to the conversation history
         """
-        self.conversations[chat_id].append({"role": "function", "name": function_name, "content": content})
+        self.conversations[chat_id].append({"role": "assistant", "tool_calls": [{
+            "id": tool_call_id, "type": "function", "function": {"name": function_name, "arguments": arguments}
+        }]})
+        self.conversations[chat_id].append({"role": "tool", "tool_call_id": tool_call_id, "content": content})
 
     def __add_to_history(self, chat_id, role, content):
         """
@@ -612,9 +635,25 @@ class OpenAIHelper:
         response = await self.client.chat.completions.create(
             model=self.config['model'],
             messages=messages,
-            temperature=1 if self.config['model'] in O_MODELS else 0.4
+            **self.__model_args(self.config['model'], self.config['max_tokens'])
         )
         return response.choices[0].message.content
+
+    def __model_args(self, model, max_tokens) -> dict:
+        """
+        Model-specific request arguments: the token limit, sampling parameters and reasoning effort.
+        """
+        if uses_legacy_params(model):
+            return {
+                'max_tokens': max_tokens,
+                'temperature': self.config['temperature'],
+                'presence_penalty': self.config['presence_penalty'],
+                'frequency_penalty': self.config['frequency_penalty'],
+            }
+        args = {'max_completion_tokens': max_tokens}
+        if self.config['reasoning_effort']:
+            args['reasoning_effort'] = self.config['reasoning_effort']
+        return args
 
     def __max_model_tokens(self):
         base = 4096
@@ -640,9 +679,8 @@ class OpenAIHelper:
                 return 32_768
             else:
                 return 65_536
-        raise NotImplementedError(
-            f"Max tokens for model {self.config['model']} is not implemented yet."
-        )
+        # Newer models have much larger context windows; summarisation keeps history well below this
+        return base * 31
 
     # https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
     def __count_tokens(self, messages) -> int:
@@ -657,11 +695,8 @@ class OpenAIHelper:
         except KeyError:
             encoding = tiktoken.get_encoding("o200k_base")
 
-        if model in GPT_ALL_MODELS:
-            tokens_per_message = 3
-            tokens_per_name = 1
-        else:
-            raise NotImplementedError(f"""num_tokens_from_messages() is not implemented for model {model}.""")
+        tokens_per_message = 3
+        tokens_per_name = 1
         num_tokens = 0
         for message in messages:
             num_tokens += tokens_per_message
@@ -677,7 +712,7 @@ class OpenAIHelper:
                             else:
                                 num_tokens += len(encoding.encode(message1['text']))
                 else:
-                    num_tokens += len(encoding.encode(value))
+                    num_tokens += len(encoding.encode(value if isinstance(value, str) else json.dumps(value)))
                     if key == "name":
                         num_tokens += tokens_per_name
         num_tokens += 3  # every reply is primed with <|start|>assistant<|message|>
@@ -694,9 +729,6 @@ class OpenAIHelper:
         image_file = io.BytesIO(image_bytes)
         image = Image.open(image_file)
         model = self.config['vision_model']
-        if model not in GPT_4_VISION_MODELS:
-            raise NotImplementedError(f"""count_tokens_vision() is not implemented for model {model}.""")
-        
         w, h = image.size
         if w > h: w, h = h, w
         # this computation follows https://platform.openai.com/docs/guides/vision and https://openai.com/pricing#gpt-4-turbo

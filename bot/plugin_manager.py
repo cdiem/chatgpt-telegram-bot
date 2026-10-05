@@ -1,4 +1,5 @@
 import json
+import logging
 
 from plugins.gtts_text_to_speech import GTTSTextToSpeech
 from plugins.auto_tts import AutoTextToSpeech
@@ -56,7 +57,12 @@ class PluginManager:
         plugin = self.__get_plugin_by_function_name(function_name)
         if not plugin:
             return json.dumps({'error': f'Function {function_name} not found'})
-        return json.dumps(await plugin.execute(function_name, helper, **json.loads(arguments)), default=str)
+        try:
+            return json.dumps(await plugin.execute(function_name, helper, **json.loads(arguments)), default=str)
+        except Exception as e:
+            # let the model answer without the plugin instead of failing the whole reply
+            logging.exception(f'Plugin function {function_name} failed')
+            return json.dumps({'error': f'Function {function_name} failed: {e}'})
 
     def get_plugin_source_name(self, function_name) -> str:
         """
